@@ -96,13 +96,6 @@ if [[ -n "$(git status --porcelain)" ]]; then
 fi
 git push origin HEAD:main
 
-if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
-  git tag -f "$TAG_NAME"
-else
-  git tag "$TAG_NAME"
-fi
-git push -f origin "$TAG_NAME"
-
 echo "==> [5/5] 上传安装包至 GitHub Releases (${TAG_NAME})..."
 if gh release view "$TAG_NAME" --repo "$REPO" >/dev/null 2>&1; then
   gh release upload "$TAG_NAME" "$ZIP_PATH" --clobber --repo "$REPO"
@@ -110,9 +103,11 @@ if gh release view "$TAG_NAME" --repo "$REPO" >/dev/null 2>&1; then
 else
   gh release create "$TAG_NAME" "$ZIP_PATH" \
     --repo "$REPO" \
+    --target main \
     --title "Sapphire ${TAG_NAME}" \
     --notes "$RELEASE_NOTES"
 fi
+git fetch --tags origin --force >/dev/null 2>&1 || true
 
 echo ""
 echo "✅ 发布完成：https://github.com/${REPO}/releases/tag/${TAG_NAME}"
