@@ -190,10 +190,24 @@ struct PermissionStatusRowView: View {
             }
             Spacer()
             let status = permissionsManager.status(for: permission.type)
+            let isBusy = (permission.type == .localNetwork && permissionsManager.isProbingLocalNetwork)
+                || (permission.type == .automation && permissionsManager.isRequestingAutomation)
             switch status {
-            case .granted: Image(systemName: "checkmark.circle.fill").font(.title2).foregroundColor(.green)
-            case .denied: Image(systemName: "xmark.circle.fill").font(.title2).foregroundColor(.red)
-            case .notRequested: Button("请求权限") { permissionsManager.requestPermission(permission.type) }.buttonStyle(.bordered).tint(.accentColor)
+            case .granted:
+                Image(systemName: "checkmark.circle.fill").font(.title2).foregroundColor(.green)
+            case .denied:
+                HStack(spacing: 8) {
+                    Image(systemName: "xmark.circle.fill").font(.title2).foregroundColor(.red)
+                    Button("去设置") { permissionsManager.openSystemSettings(for: permission.type) }
+                        .buttonStyle(.bordered)
+                }
+            case .notRequested:
+                Button(isBusy ? "授权中…" : "请求权限") {
+                    permissionsManager.requestPermission(permission.type)
+                }
+                .buttonStyle(.bordered)
+                .tint(.accentColor)
+                .disabled(isBusy)
             }
             PermissionFeatureInfoButton(permission: permission)
                 .padding(.trailing, 4)

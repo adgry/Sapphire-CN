@@ -58,18 +58,35 @@ enum SystemPreferencesPane {
     case screenCapture
     case bluetooth
     case allFiles
+    case localNetwork
+    case automation
+    case calendars
+    case reminders
+    case locationServices
+    case notifications
 
     var url: URL {
-        let suffix: String
         switch self {
-        case .privacyRoot: suffix = "Privacy"
-        case .accessibility: suffix = "Privacy_Accessibility"
-        case .camera: suffix = "Privacy_Camera"
-        case .screenCapture: suffix = "Privacy_ScreenCapture"
-        case .bluetooth: suffix = "Privacy_Bluetooth"
-        case .allFiles: suffix = "Privacy_AllFiles"
+        case .notifications:
+            return URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension")!
+        case .privacyRoot, .accessibility, .camera, .screenCapture, .bluetooth, .allFiles, .localNetwork, .automation, .calendars, .reminders, .locationServices:
+            let suffix: String
+            switch self {
+            case .privacyRoot: suffix = "Privacy"
+            case .accessibility: suffix = "Privacy_Accessibility"
+            case .camera: suffix = "Privacy_Camera"
+            case .screenCapture: suffix = "Privacy_ScreenCapture"
+            case .bluetooth: suffix = "Privacy_Bluetooth"
+            case .allFiles: suffix = "Privacy_AllFiles"
+            case .localNetwork: suffix = "Privacy_LocalNetwork"
+            case .automation: suffix = "Privacy_Automation"
+            case .calendars: suffix = "Privacy_Calendars"
+            case .reminders: suffix = "Privacy_Reminders"
+            case .locationServices: suffix = "Privacy_LocationServices"
+            case .notifications: suffix = "Privacy"
+            }
+            return URL(string: "x-apple.systempreferences:com.apple.preference.security?\(suffix)")!
         }
-        return URL(string: "x-apple.systempreferences:com.apple.preference.security?\(suffix)")!
     }
 
     func open() {

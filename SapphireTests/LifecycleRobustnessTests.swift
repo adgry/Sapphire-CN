@@ -183,6 +183,25 @@ final class LifecycleRobustnessTests: XCTestCase {
         XCTAssertEqual(publications, 0)
     }
 
+    func testBonjourServicesIncludeLocalNetworkProbeAndMediaServices() {
+        let services = Bundle.main.object(forInfoDictionaryKey: "NSBonjourServices") as? [String] ?? []
+        XCTAssertTrue(services.contains("_sapphire-lnp._tcp"))
+        XCTAssertTrue(services.contains("_sapphirecont._tcp"))
+        XCTAssertTrue(services.contains("_FC9F5ED42C8A._tcp"))
+        XCTAssertTrue(services.contains("_airplay._tcp"))
+        XCTAssertTrue(services.contains("_raop._tcp"))
+    }
+
+    func testAutomationStatusPolicyAggregatesLaunchableTargetsCleanly() {
+        XCTAssertEqual(AutomationStatusPolicy.permissionStatus(from: noErr), .granted)
+        XCTAssertEqual(AutomationStatusPolicy.permissionStatus(from: OSStatus(errAEEventNotPermitted)), .denied)
+        XCTAssertEqual(AutomationStatusPolicy.permissionStatus(from: OSStatus(errAEEventWouldRequireUserConsent)), .notRequested)
+        XCTAssertEqual(AutomationStatusPolicy.aggregateStatus(statuses: []), .notRequested)
+        XCTAssertEqual(AutomationStatusPolicy.aggregateStatus(statuses: [.granted]), .granted)
+        XCTAssertEqual(AutomationStatusPolicy.aggregateStatus(statuses: [.granted, .denied]), .denied)
+        XCTAssertEqual(AutomationStatusPolicy.aggregateStatus(statuses: [.granted, .notRequested]), .notRequested)
+    }
+
     // MARK: - Launch at login
 
     func testLaunchAtLoginAdoptsSystemSettingsChangesInsteadOfReRegistering() {

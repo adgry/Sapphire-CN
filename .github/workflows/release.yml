@@ -113,6 +113,7 @@ jobs:
           ditto "$RUNNER_TEMP/DerivedData/Build/Products/Release/Sapphire.app" "$RUNNER_TEMP/package/Sapphire.app"
           xattr -cr "$RUNNER_TEMP/package/Sapphire.app" || true
           codesign --force --deep --sign - "$RUNNER_TEMP/package/Sapphire.app"
+          codesign --force --sign - --entitlements "scripts/SapphireAdHoc.entitlements" "$RUNNER_TEMP/package/Sapphire.app"
           cd "$RUNNER_TEMP/package"
           COPYFILE_DISABLE=1 /usr/bin/zip -qryy "Sapphire-arm64.zip" "Sapphire.app"
           ls -lh "Sapphire-arm64.zip"

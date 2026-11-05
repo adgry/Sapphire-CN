@@ -108,6 +108,10 @@
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_sapphirecont._tcp</string>
+		<string>_sapphire-lnp._tcp</string>
+		<string>_FC9F5ED42C8A._tcp</string>
+		<string>_airplay._tcp</string>
+		<string>_raop._tcp</string>
 	</array>
 	<key>NSHighResolutionCapable</key>
 	<true/>

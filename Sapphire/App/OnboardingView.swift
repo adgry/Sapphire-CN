@@ -970,17 +970,41 @@ private struct PermissionRowView: View {
             PermissionFeatureInfoButton(permission: permission)
                 .padding(.trailing, 4)
             let status = manager.status(for: permission.type)
+            let isBusy = (permission.type == .localNetwork && manager.isProbingLocalNetwork)
+                || (permission.type == .automation && manager.isRequestingAutomation)
             switch status {
-            case .granted: Image(systemName: "checkmark.circle.fill").font(.title2).foregroundColor(.green)
-            case .denied: Image(systemName: "xmark.circle.fill").font(.title2).foregroundColor(.red)
+            case .granted:
+                Image(systemName: "checkmark.circle.fill").font(.title2).foregroundColor(.green)
+            case .denied:
+                HStack(spacing: 10) {
+                    Image(systemName: "xmark.circle.fill").font(.title2).foregroundColor(.red)
+                    Button(action: { manager.openSystemSettings(for: permission.type) }) {
+                        Text("去设置")
+                            .fontWeight(.semibold)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.plain)
+                    .background(Color.white.opacity(0.14))
+                    .foregroundColor(.white)
+                    .clipShape(Capsule())
+                }
             case .notRequested:
                 Button(action: { manager.requestPermission(permission.type) }) {
-                    Text("授权")
-                        .fontWeight(.bold)
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 8)
+                    HStack(spacing: 6) {
+                        if isBusy {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(.white)
+                        }
+                        Text(isBusy ? "授权中…" : "授权")
+                            .fontWeight(.bold)
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 8)
                 }
                 .buttonStyle(.plain)
+                .disabled(isBusy)
                 .background(Color.accentColor.gradient)
                 .foregroundColor(.white)
                 .clipShape(Capsule())

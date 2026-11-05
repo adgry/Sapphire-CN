@@ -67,11 +67,14 @@ class PermissionsManager: NSObject, ObservableObject, @MainActor CLLocationManag
     @Published var screenRecordingStatus: PermissionStatus = .notRequested
     @Published var localNetworkStatus: PermissionStatus = .notRequested
     @Published var automationStatus: PermissionStatus = .notRequested
+    @Published private(set) var isProbingLocalNetwork = false
+    @Published private(set) var isRequestingAutomation = false
 
     private var locationManager: CLLocationManager?
     private lazy var bluetoothManager = CBCentralManager(delegate: self, queue: nil, options: [CBCentralManagerOptionShowPowerAlertKey: 0])
 
     private let automationPermissionRequestedKey = "automationPermissionRequested"
+    private let automationActiveTargetIDsKey = "automationActiveTargetIDs"
 
     private struct AutomationTarget {
         let name: String
@@ -81,6 +84,7 @@ class PermissionsManager: NSObject, ObservableObject, @MainActor CLLocationManag
     private let automationTargets = [
         AutomationTarget(name: "Music", bundleIdentifier: "com.apple.Music"),
         AutomationTarget(name: "Spotify", bundleIdentifier: "com.spotify.client"),
+        AutomationTarget(name: "System Events", bundleIdentifier: "com.apple.systemevents"),
     ]
 
     private var localNetworkProbe: LocalNetworkAccessProbe?
@@ -92,6 +96,7 @@ class PermissionsManager: NSObject, ObservableObject, @MainActor CLLocationManag
     private var lastAutomationCheck = Date.distantPast
     private var automationCheckInFlight = false
     private var installedAutomationTargetIDs: Set<String>?
+    private var unlaunchableAutomationTargetIDs = Set<String>()
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -100,7 +105,7 @@ class PermissionsManager: NSObject, ObservableObject, @MainActor CLLocationManag
         .init(type: .fullDiskAccess, title: "完全磁盘访问权限", description: "启用文件暂存架、智能助手文件访问及更深度的系统集成。", iconName: "folder.badge.gearshape", iconColor: .gray, category: .recommended),
         .init(type: .screenRecording, title: "屏幕录制", description: "用于 Gemini Live 屏幕共享、按应用音频采集、实时窗口预览以及合盖角度桌面动画。", iconName: "record.circle", iconColor: .orange, category: .recommended),
         .init(type: .localNetwork, title: "本地网络", description: "用于发现并控制局域网内受支持的媒体播放器。", iconName: "network", iconColor: .cyan, category: .recommended),
-        .init(type: .automation, title: "自动化", description: "用于控制 Spotify 与 Apple Music 的播放并获取曲目信息。", iconName: "play.display", iconColor: .green, category: .recommended),
+        .init(type: .automation, title: "自动化", description: "用于控制 Spotify、Apple Music 及隔空播放系统事件。", iconName: "play.display", iconColor: .green, category: .recommended),
         .init(type: .notifications, title: "通知", description: "用于显示消息和系统事件的自定义提醒。", iconName: "bell.badge.fill", iconColor: .red, category: .recommended),
         .init(type: .location, title: "定位服务", description: "用于为当前所在位置提供实时天气更新。", iconName: "location.fill", iconColor: .blue, category: .recommended),
         .init(type: .calendar, title: "日历", description: "用于显示即将到来的日程事项。", iconName: "calendar", iconColor: .red, category: .recommended),
@@ -144,7 +149,7 @@ class PermissionsManager: NSObject, ObservableObject, @MainActor CLLocationManag
                 guard let self else { return }
                 self.refreshLightweightStatuses()
                 let now = Date()
-                if now.timeIntervalSince(self.lastAutomationCheck) >= Self.automationRecheckInterval {
+                if self.automationStatus != .granted || now.timeIntervalSince(self.lastAutomationCheck) >= Self.automationRecheckInterval {
                     self.checkAutomationStatus()
                 }
                 if self.localNetworkProbeRequested, self.localNetworkStatus != .granted {
@@ -268,6 +273,22 @@ class PermissionsManager: NSObject, ObservableObject, @MainActor CLLocationManag
         }
     }
 
+    func openSystemSettings(for type: PermissionType) {
+        switch type {
+        case .accessibility: SystemPreferencesPane.accessibility.open()
+        case .fullDiskAccess: SystemPreferencesPane.allFiles.open()
+        case .screenRecording: SystemPreferencesPane.screenCapture.open()
+        case .localNetwork: SystemPreferencesPane.localNetwork.open()
+        case .automation: SystemPreferencesPane.automation.open()
+        case .bluetooth: SystemPreferencesPane.bluetooth.open()
+        case .calendar: SystemPreferencesPane.calendars.open()
+        case .reminders: SystemPreferencesPane.reminders.open()
+        case .location: SystemPreferencesPane.locationServices.open()
+        case .notifications: SystemPreferencesPane.notifications.open()
+        case .focusStatus: SystemPreferencesPane.privacyRoot.open()
+        }
+    }
+
     func requestPermission(_ type: PermissionType) {
         switch type {
         case .accessibility:
@@ -278,35 +299,64 @@ class PermissionsManager: NSObject, ObservableObject, @MainActor CLLocationManag
             openFullDiskAccessSettings()
 
         case .screenRecording:
-            UserDefaults.standard.set(Date(), forKey: screenRecordingRequestedAtKey)
-            UserDefaults.standard.set(true, forKey: "screenRecordingRequested")
-            CGRequestScreenCaptureAccess()
-            checkScreenRecordingStatus()
+            if screenRecordingStatus == .denied {
+                openSystemSettings(for: .screenRecording)
+            } else {
+                UserDefaults.standard.set(Date(), forKey: screenRecordingRequestedAtKey)
+                UserDefaults.standard.set(true, forKey: "screenRecordingRequested")
+                CGRequestScreenCaptureAccess()
+                checkScreenRecordingStatus()
+            }
 
         case .automation:
-            triggerAutomationPermissionRequest()
+            if automationStatus == .denied {
+                openSystemSettings(for: .automation)
+            } else {
+                triggerAutomationPermissionRequest()
+            }
 
         case .localNetwork:
-            probeLocalNetwork(triggeredByUser: true)
+            if localNetworkStatus == .denied {
+                openSystemSettings(for: .localNetwork)
+                probeLocalNetwork(triggeredByUser: false)
+            } else {
+                probeLocalNetwork(triggeredByUser: true)
+            }
 
         case .notifications:
-            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { _, _ in
-                DispatchQueue.main.async { self.checkAllPermissions() }
+            if notificationsStatus == .denied {
+                openSystemSettings(for: .notifications)
+            } else {
+                UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { _, _ in
+                    DispatchQueue.main.async { self.checkAllPermissions() }
+                }
             }
 
         case .location:
-            locationManager?.requestWhenInUseAuthorization()
+            if locationStatus == .denied {
+                openSystemSettings(for: .location)
+            } else {
+                locationManager?.requestWhenInUseAuthorization()
+            }
 
         case .calendar:
-            Task {
-                do { _ = try await EKEventStore().requestFullAccessToEvents() } catch {}
-                await MainActor.run { self.checkAllPermissions() }
+            if calendarStatus == .denied {
+                openSystemSettings(for: .calendar)
+            } else {
+                Task {
+                    do { _ = try await EKEventStore().requestFullAccessToEvents() } catch {}
+                    await MainActor.run { self.checkAllPermissions() }
+                }
             }
 
         case .reminders:
-            Task {
-                do { _ = try await EKEventStore().requestFullAccessToReminders() } catch {}
-                await MainActor.run { self.checkAllPermissions() }
+            if remindersStatus == .denied {
+                openSystemSettings(for: .reminders)
+            } else {
+                Task {
+                    do { _ = try await EKEventStore().requestFullAccessToReminders() } catch {}
+                    await MainActor.run { self.checkAllPermissions() }
+                }
             }
 
         case .bluetooth:
@@ -320,8 +370,12 @@ class PermissionsManager: NSObject, ObservableObject, @MainActor CLLocationManag
             }
 
         case .focusStatus:
-            INFocusStatusCenter.default.requestAuthorization { _ in
-                DispatchQueue.main.async { self.checkAllPermissions() }
+            if focusStatusStatus == .denied {
+                openSystemSettings(for: .focusStatus)
+            } else {
+                INFocusStatusCenter.default.requestAuthorization { _ in
+                    DispatchQueue.main.async { self.checkAllPermissions() }
+                }
             }
         }
     }
@@ -338,6 +392,8 @@ class PermissionsManager: NSObject, ObservableObject, @MainActor CLLocationManag
         automationCheckInFlight = true
 
         let targets = automationTargets
+        let unlaunchableIDs = unlaunchableAutomationTargetIDs
+        let persistedActiveIDs = Set(UserDefaults.standard.stringArray(forKey: automationActiveTargetIDsKey) ?? [])
         Task {
             defer { automationCheckInFlight = false }
             if installedAutomationTargetIDs == nil {
@@ -348,30 +404,41 @@ class PermissionsManager: NSObject, ObservableObject, @MainActor CLLocationManag
                 }.value
                 installedAutomationTargetIDs = ids
             }
-            let installed = targets.filter { installedAutomationTargetIDs?.contains($0.bundleIdentifier) == true }
+            let runningIDs = Set(targets.map(\.bundleIdentifier).filter {
+                !NSRunningApplication.runningApplications(withBundleIdentifier: $0).isEmpty
+            })
+            let candidateIDs: Set<String>
+            if !persistedActiveIDs.isEmpty {
+                candidateIDs = persistedActiveIDs.union(runningIDs).subtracting(unlaunchableIDs)
+            } else {
+                candidateIDs = (installedAutomationTargetIDs ?? []).subtracting(unlaunchableIDs)
+            }
+            let evaluableTargets = targets.filter { candidateIDs.contains($0.bundleIdentifier) }
 
             var statuses: [PermissionStatus] = []
-            for target in installed {
+            for target in evaluableTargets {
                 statuses.append(await getAutomationPermissionStatus(for: target))
             }
 
-            if statuses.contains(PermissionStatus.denied) {
-                assign(\.automationStatus, .denied)
-            } else if !statuses.isEmpty && statuses.allSatisfy({ $0 == PermissionStatus.granted }) {
-                assign(\.automationStatus, .granted)
-            } else {
-                assign(\.automationStatus, .notRequested)
-            }
+            assign(\.automationStatus, AutomationStatusPolicy.aggregateStatus(statuses: statuses))
         }
     }
 
     private func triggerAutomationPermissionRequest() {
+        guard !isRequestingAutomation else { return }
+        isRequestingAutomation = true
+
         Task(priority: .userInitiated) {
-            var foundTarget = false
+            defer { self.isRequestingAutomation = false }
+            var activeTargetIDs = Set<String>()
 
             for target in automationTargets {
-                guard await launchAutomationTarget(target) else { continue }
-                foundTarget = true
+                guard await launchAutomationTarget(target) else {
+                    self.unlaunchableAutomationTargetIDs.insert(target.bundleIdentifier)
+                    continue
+                }
+                self.unlaunchableAutomationTargetIDs.remove(target.bundleIdentifier)
+                activeTargetIDs.insert(target.bundleIdentifier)
 
                 print("[PermissionsManager] Requesting Automation permission for \(target.name)...")
                 let status = await Self.determineAutomationPermission(
@@ -379,10 +446,18 @@ class PermissionsManager: NSObject, ObservableObject, @MainActor CLLocationManag
                     askUserIfNeeded: true
                 )
                 print("[PermissionsManager] Automation request for \(target.name) returned \(status).")
+                if let mapped = AutomationStatusPolicy.permissionStatus(from: status) {
+                    let cacheKey = "automationPermissionStatus.\(target.bundleIdentifier)"
+                    UserDefaults.standard.set(mapped.rawValue, forKey: cacheKey)
+                }
             }
 
-            guard foundTarget else { return }
+            guard !activeTargetIDs.isEmpty else {
+                self.openSystemSettings(for: .automation)
+                return
+            }
             UserDefaults.standard.set(true, forKey: automationPermissionRequestedKey)
+            UserDefaults.standard.set(Array(activeTargetIDs), forKey: automationActiveTargetIDsKey)
             self.installedAutomationTargetIDs = nil
 
             self.checkAutomationStatus()
@@ -402,6 +477,7 @@ class PermissionsManager: NSObject, ObservableObject, @MainActor CLLocationManag
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = false
         configuration.addsToRecentItems = false
+        configuration.promptsUserIfNeeded = false
 
         return await withCheckedContinuation { continuation in
             NSWorkspace.shared.openApplication(at: applicationURL, configuration: configuration) { application, error in
@@ -435,14 +511,8 @@ class PermissionsManager: NSObject, ObservableObject, @MainActor CLLocationManag
         guard !NSRunningApplication.runningApplications(withBundleIdentifier: target.bundleIdentifier).isEmpty else {
             return UserDefaults.standard.string(forKey: cacheKey).flatMap(PermissionStatus.init(rawValue:)) ?? .notRequested
         }
-        let status: PermissionStatus?
-        switch await Self.determineAutomationPermission(for: target.bundleIdentifier, askUserIfNeeded: false) {
-        case noErr: status = .granted
-        case OSStatus(errAEEventNotPermitted): status = .denied
-        case OSStatus(errAEEventWouldRequireUserConsent): status = .notRequested
-        default: status = nil
-        }
-        if let status {
+        let rawStatus = await Self.determineAutomationPermission(for: target.bundleIdentifier, askUserIfNeeded: false)
+        if let status = AutomationStatusPolicy.permissionStatus(from: rawStatus) {
             UserDefaults.standard.set(status.rawValue, forKey: cacheKey)
             return status
         }
@@ -495,15 +565,25 @@ class PermissionsManager: NSObject, ObservableObject, @MainActor CLLocationManag
     }
 
     private func probeLocalNetwork(triggeredByUser: Bool) {
+        let wasPreviouslyRequested = UserDefaults.standard.bool(forKey: localNetworkRequestedKey)
         if triggeredByUser { UserDefaults.standard.set(true, forKey: localNetworkRequestedKey) }
         guard localNetworkProbe == nil else { return }
-        let probe = LocalNetworkAccessProbe { [weak self] result in
+        if triggeredByUser { isProbingLocalNetwork = true }
+        let startedAt = Date()
+        let probe = LocalNetworkAccessProbe(triggeredByUser: triggeredByUser) { [weak self] result in
             guard let self else { return }
             self.localNetworkProbe = nil
+            self.isProbingLocalNetwork = false
             switch result {
-            case .granted: self.updateLocalNetworkStatus(.granted)
-            case .denied: self.updateLocalNetworkStatus(.denied)
-            case .undetermined: break
+            case .granted:
+                self.updateLocalNetworkStatus(.granted)
+            case .denied:
+                self.updateLocalNetworkStatus(.denied)
+                if triggeredByUser && wasPreviouslyRequested && Date().timeIntervalSince(startedAt) < 2.5 {
+                    self.openSystemSettings(for: .localNetwork)
+                }
+            case .undetermined:
+                break
             }
         }
         localNetworkProbe = probe
@@ -559,6 +639,29 @@ enum ScreenRecordingStatusPolicy {
     }
 }
 
+// MARK: - Automation status
+
+enum AutomationStatusPolicy {
+    nonisolated static func permissionStatus(from status: OSStatus) -> PermissionStatus? {
+        switch status {
+        case noErr: return .granted
+        case OSStatus(errAEEventNotPermitted): return .denied
+        case OSStatus(errAEEventWouldRequireUserConsent): return .notRequested
+        default: return nil
+        }
+    }
+
+    nonisolated static func aggregateStatus(statuses: [PermissionStatus]) -> PermissionStatus {
+        if statuses.contains(.denied) {
+            return .denied
+        }
+        if !statuses.isEmpty && statuses.allSatisfy({ $0 == .granted }) {
+            return .granted
+        }
+        return .notRequested
+    }
+}
+
 // MARK: - Local Network probe
 
 @MainActor
@@ -566,72 +669,151 @@ final class LocalNetworkAccessProbe {
     enum Result { case granted, denied, undetermined }
 
     private static let serviceType = "_sapphire-lnp._tcp"
-    private static let timeout: TimeInterval = 8
+    private static let userTimeout: TimeInterval = 25
+    private static let backgroundTimeout: TimeInterval = 6
 
+    private let triggeredByUser: Bool
     private let completion: @MainActor (Result) -> Void
     private let serviceName = "Sapphire-\(UUID().uuidString.prefix(8))"
-    private let queue = DispatchQueue(label: "com.sapphire.local-network-probe", qos: .utility)
+    private let queue = DispatchQueue(label: "com.sapphire.local-network-probe", qos: .userInitiated)
     private var listener: NWListener?
     private var browser: NWBrowser?
     private var timeoutWork: DispatchWorkItem?
+    private var postActivationWork: DispatchWorkItem?
+    private var activeObserver: NSObjectProtocol?
+    private var startedAt = Date.distantPast
+    private var sawPolicyDenied = false
     private var isFinished = false
 
-    init(completion: @escaping @MainActor (Result) -> Void) {
+    init(triggeredByUser: Bool = false, completion: @escaping @MainActor (Result) -> Void) {
+        self.triggeredByUser = triggeredByUser
         self.completion = completion
     }
 
     func start() {
-        do {
-            let listener = try NWListener(using: .tcp)
-            listener.service = NWListener.Service(name: serviceName, type: Self.serviceType)
-            listener.newConnectionHandler = { $0.cancel() }
-            listener.stateUpdateHandler = { [weak self] state in
-                guard case .failed = state else { return }
-                DispatchQueue.main.async { self?.finish(.undetermined) }
-            }
-            self.listener = listener
-            listener.start(queue: queue)
-        } catch {
-            finish(.undetermined)
-            return
-        }
+        startedAt = Date()
+        startListener()
 
         let name = serviceName
         let browser = NWBrowser(for: .bonjour(type: Self.serviceType, domain: nil), using: NWParameters())
         browser.stateUpdateHandler = { [weak self] state in
-            let result: Result?
             switch state {
-            case .waiting(let error): result = Self.isPolicyDenied(error) ? .denied : nil
-            case .failed(let error): result = Self.isPolicyDenied(error) ? .denied : .undetermined
-            default: result = nil
+            case .ready:
+                DispatchQueue.main.async {
+                    guard let self, !self.isFinished else { return }
+                    if self.sawPolicyDenied {
+                        self.restartListener()
+                    }
+                }
+            case .waiting(let error):
+                guard Self.isDeniedError(error) else { return }
+                DispatchQueue.main.async {
+                    self?.handleDeniedSignal()
+                }
+            case .failed(let error):
+                let isDenied = Self.isDeniedError(error)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if isDenied {
+                        self.handleDeniedSignal()
+                    } else {
+                        self.finish(.undetermined)
+                    }
+                }
+            default:
+                break
             }
-            guard let result else { return }
-            DispatchQueue.main.async { self?.finish(result) }
         }
         browser.browseResultsChangedHandler = { [weak self] results, _ in
+            guard !results.isEmpty else { return }
             let sawSelf = results.contains { result in
                 if case .service(let found, _, _, _) = result.endpoint { return found == name }
                 return false
             }
-            guard sawSelf else { return }
+            guard sawSelf || !results.isEmpty else { return }
             DispatchQueue.main.async { self?.finish(.granted) }
         }
         self.browser = browser
         browser.start(queue: queue)
 
-        let work = DispatchWorkItem { [weak self] in self?.finish(.undetermined) }
+        if triggeredByUser {
+            activeObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didBecomeActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self, !self.isFinished else { return }
+                    guard Date().timeIntervalSince(self.startedAt) >= 0.4 else { return }
+                    self.postActivationWork?.cancel()
+                    let check = DispatchWorkItem { [weak self] in
+                        guard let self, !self.isFinished else { return }
+                        if self.sawPolicyDenied {
+                            self.finish(.denied)
+                        }
+                    }
+                    self.postActivationWork = check
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.9, execute: check)
+                }
+            }
+        }
+
+        let timeoutInterval = triggeredByUser ? Self.userTimeout : Self.backgroundTimeout
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.finish(self.sawPolicyDenied ? .denied : .undetermined)
+        }
         timeoutWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.timeout, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeoutInterval, execute: work)
     }
 
-    private nonisolated static func isPolicyDenied(_ error: NWError) -> Bool {
-        if case .dns(let code) = error { return code == DNSServiceErrorType(kDNSServiceErr_PolicyDenied) }
+    private func startListener() {
+        do {
+            let listener = try NWListener(using: .tcp)
+            listener.service = NWListener.Service(name: serviceName, type: Self.serviceType)
+            listener.newConnectionHandler = { $0.cancel() }
+            self.listener = listener
+            listener.start(queue: queue)
+        } catch {
+            print("[LocalNetworkAccessProbe] Listener creation failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func restartListener() {
+        listener?.cancel()
+        listener = nil
+        startListener()
+    }
+
+    private func handleDeniedSignal() {
+        guard !isFinished else { return }
+        sawPolicyDenied = true
+        if !triggeredByUser {
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, !self.isFinished else { return }
+                self.finish(.denied)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+        }
+    }
+
+    nonisolated static func isDeniedError(_ error: NWError) -> Bool {
+        if case .dns(let code) = error {
+            return code == DNSServiceErrorType(kDNSServiceErr_PolicyDenied)
+                || code == DNSServiceErrorType(kDNSServiceErr_NoAuth)
+        }
         return false
     }
 
     private func finish(_ result: Result) {
         guard !isFinished else { return }
         isFinished = true
+        if let activeObserver {
+            NotificationCenter.default.removeObserver(activeObserver)
+            self.activeObserver = nil
+        }
+        postActivationWork?.cancel()
+        postActivationWork = nil
         timeoutWork?.cancel()
         timeoutWork = nil
         browser?.cancel()
