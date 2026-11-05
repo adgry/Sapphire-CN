@@ -79,6 +79,10 @@ STAGED_APP="$DIST_DIR/Sapphire.app"
 ditto "$BUILT_APP" "$STAGED_APP"
 xattr -cr "$STAGED_APP" || true
 codesign --force --deep --sign - "$STAGED_APP"
+codesign --force --sign - \
+  --identifier com.shariq.sapphireHelper \
+  --entitlements "$ROOT_DIR/com.shariq.sapphireHelper/sapphireHelper.entitlements" \
+  "$STAGED_APP/Contents/MacOS/com.shariq.sapphireHelper"
 codesign --force --sign - --entitlements "$ROOT_DIR/scripts/SapphireAdHoc.entitlements" "$STAGED_APP"
 
 ZIP_NAME="Sapphire-arm64.zip"

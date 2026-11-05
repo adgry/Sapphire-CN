@@ -32,6 +32,7 @@ struct CodesignCheck {
         let teamIdentifier: String?
         let certificateData: [Data]
         let isAdHoc: Bool
+        let codeURL: URL?
     }
 
     static func isSapphireClient(auditToken: audit_token_t) throws -> Bool {
@@ -42,9 +43,7 @@ struct CodesignCheck {
         let helperIdentity = try signingIdentity(forStaticCode: helperStaticCode)
         let clientIdentity = try signingIdentity(forStaticCode: clientStaticCode)
         let helperBundleMatches = helperIdentity.bundleIdentifier == helperSigningIdentifier
-            || (geteuid() != 0
-                && helperIdentity.isAdHoc
-                && helperIdentity.bundleIdentifier == nil)
+            || (helperIdentity.isAdHoc && helperIdentity.bundleIdentifier == nil)
 
         guard helperIdentity.signingIdentifier == helperSigningIdentifier,
               helperBundleMatches,
@@ -84,7 +83,24 @@ struct CodesignCheck {
                 && helper.certificateData == client.certificateData
         }
 
-        return geteuid() != 0 && helper.isAdHoc && client.isAdHoc
+        guard helper.isAdHoc && client.isAdHoc else {
+            return false
+        }
+
+        if let helperURL = helper.codeURL,
+           let clientURL = client.codeURL {
+            let enclosingAppURL = helperURL
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .resolvingSymlinksInPath()
+                .standardizedFileURL
+            if enclosingAppURL.path == clientURL.path {
+                return true
+            }
+        }
+
+        return geteuid() != 0
     }
 
     private static func signingIdentity(forStaticCode staticCode: SecStaticCode) throws -> SigningIdentity {
@@ -102,6 +118,15 @@ struct CodesignCheck {
             throw CodesignCheckError.message("代码签名信息为空")
         }
 
+        var rawPath: CFURL?
+        let resolvedURL: URL?
+        if SecCodeCopyPath(staticCode, [], &rawPath) == errSecSuccess,
+           let url = rawPath as URL? {
+            resolvedURL = url.resolvingSymlinksInPath().standardizedFileURL
+        } else {
+            resolvedURL = nil
+        }
+
         let securedInfoPlist = information[kSecCodeInfoPList as String] as? [String: Any]
         let certificates = information[kSecCodeInfoCertificates as String] as? [SecCertificate] ?? []
         let flags = (information[kSecCodeInfoFlags as String] as? NSNumber)?.uint32Value ?? 0
@@ -111,7 +136,8 @@ struct CodesignCheck {
             bundleIdentifier: securedInfoPlist?["CFBundleIdentifier"] as? String,
             teamIdentifier: information[kSecCodeInfoTeamIdentifier as String] as? String,
             certificateData: certificates.map { SecCertificateCopyData($0) as Data },
-            isAdHoc: flags & adHocSignatureFlag != 0
+            isAdHoc: flags & adHocSignatureFlag != 0,
+            codeURL: resolvedURL
         )
     }
 

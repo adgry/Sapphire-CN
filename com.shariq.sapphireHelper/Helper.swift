@@ -23,6 +23,18 @@ private enum HelperSapphireVersionOrdering {
         let major = compareInteger(left.core.first ?? "0", right.core.first ?? "0")
         if major != .orderedSame { return major }
 
+        if let majorNumber = Int(normalizedDigits(left.core.first ?? "0")), majorNumber >= 3 {
+            let coreCount = max(left.core.count, right.core.count)
+            for index in 1..<coreCount {
+                let component = compareInteger(
+                    index < left.core.count ? left.core[index] : "0",
+                    index < right.core.count ? right.core[index] : "0"
+                )
+                if component != .orderedSame { return component }
+            }
+            return comparePrerelease(left.prerelease, right.prerelease)
+        }
+
         let minor = compareFraction(
             left.core.count > 1 ? left.core[1] : "0",
             right.core.count > 1 ? right.core[1] : "0"
@@ -848,16 +860,21 @@ class Helper: NSObject, HelperProtocol {
         }
 
         var currentCode: SecStaticCode?
+        var currentSigningInfo: CFDictionary?
         var requirement: SecRequirement?
         let validationFlags = SecCSFlags(rawValue: kSecCSCheckAllArchitectures | kSecCSStrictValidate | kSecCSCheckNestedCode)
         guard SecStaticCodeCreateWithPath(currentURL as CFURL, [], &currentCode) == errSecSuccess,
               let currentCode,
               SecStaticCodeCheckValidity(currentCode, validationFlags, nil) == errSecSuccess,
+              SecCodeCopySigningInformation(currentCode, SecCSFlags(rawValue: kSecCSSigningInformation), &currentSigningInfo) == errSecSuccess,
               SecCodeCopyDesignatedRequirement(currentCode, [], &requirement) == errSecSuccess,
               let requirement else {
             fail("The installed Sapphire signature could not be validated.")
             return
         }
+        let currentInfoDict = currentSigningInfo as? [String: Any]
+        let currentCodeFlags = (currentInfoDict?[kSecCodeInfoFlags as String] as? NSNumber)?.uint32Value ?? 0
+        let currentIsAdHoc = (currentCodeFlags & 0x0002) != 0
 
         let currentBundle = Bundle(url: currentURL)
         guard let currentVersion = currentBundle?
@@ -874,6 +891,11 @@ class Helper: NSObject, HelperProtocol {
         let stagingURL = parent.appendingPathComponent(".Sapphire-update-\(transactionID).app")
         do {
             try fileManager.copyItem(at: newURL, to: stagingURL)
+            let xattrTask = Process()
+            xattrTask.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
+            xattrTask.arguments = ["-cr", stagingURL.path]
+            try? xattrTask.run()
+            xattrTask.waitUntilExit()
         } catch {
             try? fileManager.removeItem(at: stagingURL)
             fail("Could not stage the update: \(error.localizedDescription)")
@@ -881,6 +903,7 @@ class Helper: NSObject, HelperProtocol {
         }
 
         var stagedCode: SecStaticCode?
+        var stagedSigningInfo: CFDictionary?
         let stagedBundle = Bundle(url: stagingURL)
         let stagedVersion = stagedBundle?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         let stagedBuild = stagedBundle?.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
@@ -890,12 +913,15 @@ class Helper: NSObject, HelperProtocol {
         let isMonotonicUpgrade = marketingComparison == .orderedDescending
             || (marketingComparison == .orderedSame
                 && HelperSapphireVersionOrdering.compareBuild(stagedBuild, currentBuild) == .orderedDescending)
+        let effectiveRequirement: SecRequirement? = currentIsAdHoc ? nil : requirement
         guard stagedBundle?.bundleIdentifier == "com.cshariq.sapphire",
               stagedVersion == expectedVersion,
               isMonotonicUpgrade,
               SecStaticCodeCreateWithPath(stagingURL as CFURL, [], &stagedCode) == errSecSuccess,
               let stagedCode,
-              SecStaticCodeCheckValidity(stagedCode, validationFlags, requirement) == errSecSuccess else {
+              SecStaticCodeCheckValidity(stagedCode, validationFlags, effectiveRequirement) == errSecSuccess,
+              SecCodeCopySigningInformation(stagedCode, SecCSFlags(rawValue: kSecCSSigningInformation), &stagedSigningInfo) == errSecSuccess,
+              (stagedSigningInfo as? [String: Any])?[kSecCodeInfoIdentifier as String] as? String == "com.cshariq.sapphire" else {
             try? fileManager.removeItem(at: stagingURL)
             fail("The staged update must be newer than the installed signed release and match its verified version and signature.")
             return

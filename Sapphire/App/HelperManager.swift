@@ -537,6 +537,13 @@ class HelperManager: ObservableObject {
             if await pingUntilRunning(), await helperProtocolVersionMatches() {
                 return true
             }
+        } else if !forceReinstall && status == .enabled {
+            helperLogger.info("[HelperManager] Enabled helper did not respond to ping; automatically rebuilding SMAppService registration")
+            _ = await reinstallHelper()
+            _ = await refreshStatus()
+            if await pingUntilRunning(), await helperProtocolVersionMatches() {
+                return true
+            }
         }
 
         refreshIssue()
