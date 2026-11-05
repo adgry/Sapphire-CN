@@ -36,6 +36,11 @@ python3 - "$ROOT_DIR/Sapphire.xcodeproj/project.pbxproj" "$CLEAN_VERSION" <<'PY'
 import re, sys
 
 pbxproj_path, new_version = sys.argv[1], sys.argv[2]
+nums = [int(x) for x in re.findall(r"\d+", new_version)]
+while len(nums) < 3:
+    nums.append(0)
+build_number = max(2, nums[0] * 10000 + nums[1] * 100 + nums[2])
+
 with open(pbxproj_path, "r", encoding="utf-8") as f:
     content = f.read()
 
@@ -45,9 +50,20 @@ pattern = re.compile(
 updated, count = pattern.subn(rf"\g<1>{new_version}\g<3>", content)
 if count == 0:
     raise SystemExit("未能在 project.pbxproj 中定位主应用 MARKETING_VERSION")
+
+build_pattern = re.compile(
+    r"(CODE_SIGN_ENTITLEMENTS = Sapphire/Sapphire(?:Debug)?\.entitlements;[\s\S]{0,300}?CURRENT_PROJECT_VERSION = )([^;]+)(;)"
+)
+updated, build_count = build_pattern.subn(rf"\g<1>{build_number}\g<3>", updated)
+if build_count == 0:
+    raise SystemExit("未能在 project.pbxproj 中定位主应用 CURRENT_PROJECT_VERSION")
+
 with open(pbxproj_path, "w", encoding="utf-8") as f:
     f.write(updated)
-print(f"    已更新 project.pbxproj 中 {count} 处主应用 MARKETING_VERSION -> {new_version}")
+print(
+    f"    已更新 project.pbxproj 中 {count} 处 MARKETING_VERSION -> {new_version}, "
+    f"{build_count} 处 CURRENT_PROJECT_VERSION -> {build_number}"
+)
 PY
 
 echo "==> [2/5] 编译 Release 版 Sapphire.app..."
@@ -91,6 +107,7 @@ ZIP_PATH="$DIST_DIR/$ZIP_NAME"
   cd "$DIST_DIR"
   COPYFILE_DISABLE=1 /usr/bin/zip -qryy "$ZIP_NAME" "Sapphire.app"
 )
+rm -rf "$STAGED_APP"
 
 echo "    安装包已生成: $ZIP_PATH ($(du -h "$ZIP_PATH" | awk '{print $1}'))"
 

@@ -88,7 +88,7 @@ class PermissionsManager: NSObject, ObservableObject, @MainActor CLLocationManag
     ]
 
     private var localNetworkProbe: LocalNetworkAccessProbe?
-    private let localNetworkStatusKey = "localNetworkPermissionStatus.v2"
+    private let localNetworkStatusKey = "localNetworkPermissionStatus.v3"
     private let localNetworkRequestedKey = "localNetworkPermissionRequested"
     private let screenRecordingRequestedAtKey = "screenRecordingRequestedAt"
 
@@ -590,6 +590,15 @@ class PermissionsManager: NSObject, ObservableObject, @MainActor CLLocationManag
         probe.start()
     }
 
+    func retryLocalNetworkPermission() {
+        localNetworkProbe?.cancel()
+        localNetworkProbe = nil
+        isProbingLocalNetwork = false
+        UserDefaults.standard.removeObject(forKey: localNetworkStatusKey)
+        assign(\.localNetworkStatus, .notRequested)
+        probeLocalNetwork(triggeredByUser: true)
+    }
+
     private func updateLocalNetworkStatus(_ newStatus: PermissionStatus) {
         assign(\.localNetworkStatus, newStatus)
         UserDefaults.standard.set(newStatus.rawValue, forKey: localNetworkStatusKey)
@@ -668,16 +677,17 @@ enum AutomationStatusPolicy {
 final class LocalNetworkAccessProbe {
     enum Result { case granted, denied, undetermined }
 
-    private static let serviceType = "_sapphire-lnp._tcp"
+    nonisolated static let bonjourServiceType = "_sapphirecont._tcp"
     private static let userTimeout: TimeInterval = 25
     private static let backgroundTimeout: TimeInterval = 6
 
     private let triggeredByUser: Bool
     private let completion: @MainActor (Result) -> Void
-    private let serviceName = "Sapphire-\(UUID().uuidString.prefix(8))"
+    private let serviceName = "SapphireLNP-\(UUID().uuidString.prefix(8))"
     private let queue = DispatchQueue(label: "com.sapphire.local-network-probe", qos: .userInitiated)
     private var listener: NWListener?
     private var browser: NWBrowser?
+    private var udpTrigger: NWConnection?
     private var timeoutWork: DispatchWorkItem?
     private var postActivationWork: DispatchWorkItem?
     private var activeObserver: NSObjectProtocol?
@@ -692,10 +702,13 @@ final class LocalNetworkAccessProbe {
 
     func start() {
         startedAt = Date()
+        if triggeredByUser {
+            startUDPTrigger()
+        }
         startListener()
 
         let name = serviceName
-        let browser = NWBrowser(for: .bonjour(type: Self.serviceType, domain: nil), using: NWParameters())
+        let browser = NWBrowser(for: .bonjour(type: Self.bonjourServiceType, domain: nil), using: NWParameters())
         browser.stateUpdateHandler = { [weak self] state in
             switch state {
             case .ready:
@@ -767,10 +780,37 @@ final class LocalNetworkAccessProbe {
         DispatchQueue.main.asyncAfter(deadline: .now() + timeoutInterval, execute: work)
     }
 
+    func cancel() {
+        guard !isFinished else { return }
+        isFinished = true
+        cleanupResources()
+    }
+
+    private func startUDPTrigger() {
+        let connection = NWConnection(
+            host: NWEndpoint.Host("224.0.0.251"),
+            port: NWEndpoint.Port(rawValue: 9)!,
+            using: .udp
+        )
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
+            guard case .ready = state, let connection else { return }
+            connection.send(content: Data([0]), completion: .contentProcessed { _ in
+                connection.cancel()
+                DispatchQueue.main.async {
+                    if self?.udpTrigger === connection {
+                        self?.udpTrigger = nil
+                    }
+                }
+            })
+        }
+        udpTrigger = connection
+        connection.start(queue: queue)
+    }
+
     private func startListener() {
         do {
             let listener = try NWListener(using: .tcp)
-            listener.service = NWListener.Service(name: serviceName, type: Self.serviceType)
+            listener.service = NWListener.Service(name: serviceName, type: Self.bonjourServiceType)
             listener.newConnectionHandler = { $0.cancel() }
             self.listener = listener
             listener.start(queue: queue)
@@ -800,14 +840,11 @@ final class LocalNetworkAccessProbe {
     nonisolated static func isDeniedError(_ error: NWError) -> Bool {
         if case .dns(let code) = error {
             return code == DNSServiceErrorType(kDNSServiceErr_PolicyDenied)
-                || code == DNSServiceErrorType(kDNSServiceErr_NoAuth)
         }
         return false
     }
 
-    private func finish(_ result: Result) {
-        guard !isFinished else { return }
-        isFinished = true
+    private func cleanupResources() {
         if let activeObserver {
             NotificationCenter.default.removeObserver(activeObserver)
             self.activeObserver = nil
@@ -816,10 +853,18 @@ final class LocalNetworkAccessProbe {
         postActivationWork = nil
         timeoutWork?.cancel()
         timeoutWork = nil
+        udpTrigger?.cancel()
+        udpTrigger = nil
         browser?.cancel()
         browser = nil
         listener?.cancel()
         listener = nil
+    }
+
+    private func finish(_ result: Result) {
+        guard !isFinished else { return }
+        isFinished = true
+        cleanupResources()
         completion(result)
     }
 }

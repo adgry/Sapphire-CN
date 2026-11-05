@@ -120,14 +120,17 @@ struct HelperStatusBanner: View {
             Spacer(minLength: 8)
 
             HStack(spacing: 8) {
-                if let issue = helperManager.lastIssue {
+                if helperManager.isReconcilingHelper && !helperManager.isRunning {
+                    ProgressView()
+                        .controlSize(.small)
+                } else if let issue = helperManager.lastIssue {
                     Button("操作说明") {
                         HelperAlertPresenter.present(issue)
                     }
                     .buttonStyle(.bordered)
                 }
 
-                if !helperManager.isRunning {
+                if !helperManager.isRunning && !helperManager.isReconcilingHelper {
                     if helperManager.status == .enabled {
                         Button(helperManager.isResettingHelper ? "正在重置…" : "重置辅助工具") {
                             helperManager.resetOwnBackgroundActivity()
@@ -176,9 +179,12 @@ class HelperManager: ObservableObject {
     @Published var isRunning: Bool = false
     @Published var lastIssue: HelperIssue?
     @Published var isResettingHelper = false
+    @Published private(set) var isReconcilingHelper = false
 
     private var isRegistering = false
     private var healthCheckInFlight = false
+    private var installIfNeededInFlight = false
+    private var hasCompletedInitialHealthCheck = false
     private var connectionObservers: [NSObjectProtocol] = []
     private var lastHealthCheck = Date.distantPast
     private let healthCheckMinimumInterval: TimeInterval = 5
@@ -195,6 +201,7 @@ class HelperManager: ObservableObject {
 
     var bannerTitle: String {
         if isRunning { return "辅助工具已启用" }
+        if isReconcilingHelper { return "正在连接辅助工具…" }
         return lastIssue?.title ?? "辅助工具未安装"
     }
 
@@ -202,11 +209,15 @@ class HelperManager: ObservableObject {
         if isRunning {
             return "特权辅助工具正在运行。"
         }
+        if isReconcilingHelper {
+            return "正在验证并启动特权辅助服务…"
+        }
         return lastIssue?.shortSummary ?? "安装辅助工具以启用电池管理与系统集成。"
     }
 
     var bannerSymbol: String {
         if isRunning { return "checkmark.circle.fill" }
+        if isReconcilingHelper { return "arrow.triangle.2.circlepath.circle.fill" }
         switch lastIssue {
         case .spawnFailed: return "exclamationmark.octagon.fill"
         case .needsApproval: return "exclamationmark.triangle.fill"
@@ -217,6 +228,7 @@ class HelperManager: ObservableObject {
 
     var bannerColor: Color {
         if isRunning { return .green }
+        if isReconcilingHelper { return .secondary }
         switch lastIssue {
         case .spawnFailed: return .red
         case .needsApproval: return .yellow
@@ -247,7 +259,19 @@ class HelperManager: ObservableObject {
             }
         ]
 
-        Task { _ = await refreshStatus() }
+        Task {
+            let current = await refreshStatus()
+            if current == .enabled {
+                if OnboardingLaunchPolicy.shouldShowOnboarding {
+                    _ = await registerHelper(userInitiated: false, forceReinstall: false, presentsUI: false)
+                } else {
+                    installIfNeeded()
+                }
+            } else {
+                hasCompletedInitialHealthCheck = true
+                refreshIssue()
+            }
+        }
     }
 
     deinit {
@@ -358,16 +382,18 @@ class HelperManager: ObservableObject {
     }
 
     func checkIfRunning(force: Bool = false) {
-        guard !isRegistering, !healthCheckInFlight else { return }
+        guard !isRegistering, !installIfNeededInFlight, !healthCheckInFlight else { return }
         let now = Date()
         guard force || now.timeIntervalSince(lastHealthCheck) >= healthCheckMinimumInterval else { return }
         healthCheckInFlight = true
         lastHealthCheck = now
+        refreshIssue()
 
         Task { @MainActor [weak self] in
             guard let self else { return }
             let running = await XPCClient.shared.ping(timeout: 2)
             self.healthCheckInFlight = false
+            self.hasCompletedInitialHealthCheck = true
             helperLogger.info("[HelperManager] Ping result: \(running ? "running" : "NOT running"), current status: \(String(describing: self.status))")
             self.applyPingResult(running)
         }
@@ -387,14 +413,27 @@ class HelperManager: ObservableObject {
             guard let self else { return }
             let currentStatus = await self.refreshStatus()
             helperLogger.info("[HelperManager] beginInstallation status=\(String(describing: currentStatus))")
+            if currentStatus == .enabled, await self.helperIsRunningAndCurrent() {
+                self.hasCompletedInitialHealthCheck = true
+                self.applyPingResult(true)
+                return
+            }
             _ = await self.registerHelper(userInitiated: true, forceReinstall: false)
         }
     }
 
     func installIfNeeded() {
         guard !OnboardingLaunchPolicy.shouldShowOnboarding else { return }
+        guard !installIfNeededInFlight else { return }
+        installIfNeededInFlight = true
+        refreshIssue()
         Task { @MainActor [weak self] in
             guard let self else { return }
+            defer {
+                self.installIfNeededInFlight = false
+                self.hasCompletedInitialHealthCheck = true
+                self.refreshIssue()
+            }
             let currentStatus = await self.refreshStatus()
             helperLogger.info("[HelperManager] installIfNeeded daemon=\(String(describing: currentStatus)) issue=\(self.lastIssue?.code ?? "none")")
 
@@ -411,7 +450,7 @@ class HelperManager: ObservableObject {
                 helperLogger.info("[HelperManager] Helper enabled but down or stale; rebuilding registration")
                 _ = await self.registerHelper(userInitiated: false, forceReinstall: true, presentsUI: false)
             case .requiresApproval:
-                self.refreshIssue()
+                break
             @unknown default:
                 break
             }
@@ -457,13 +496,17 @@ class HelperManager: ObservableObject {
     private func performOwnBackgroundActivityReset() async {
         isResettingHelper = true
         isRegistering = true
+        refreshIssue()
         defer {
             isRegistering = false
             isResettingHelper = false
+            hasCompletedInitialHealthCheck = true
+            refreshIssue()
         }
 
         helperLogger.info("[HelperManager] Resetting helper via SMAppService unregister/register")
         XPCClient.shared.stop()
+        try? await Task.sleep(for: .milliseconds(400))
 
         if let errorDescription = await Self.unregisterDaemon() {
             helperLogger.error("[HelperManager] Helper unregister failed: \(errorDescription)")
@@ -471,10 +514,9 @@ class HelperManager: ObservableObject {
             helperLogger.info("[HelperManager] Unregistered privileged helper")
         }
 
-        try? await Task.sleep(for: .milliseconds(800))
+        try? await Task.sleep(for: .milliseconds(1200))
         _ = await submitRegistration()
         _ = await refreshStatus()
-        refreshIssue()
 
         if await pingUntilRunning() {
             helperLogger.info("[HelperManager] Helper recovered after SMAppService reset")
@@ -494,9 +536,17 @@ class HelperManager: ObservableObject {
 
         isRegistering = true
         lastRegisterAttempt = Date()
-        defer { isRegistering = false }
+        refreshIssue()
+        defer {
+            isRegistering = false
+            hasCompletedInitialHealthCheck = true
+            refreshIssue()
+        }
 
         guard bundledPlistIsReadable() else {
+            isRegistering = false
+            hasCompletedInitialHealthCheck = true
+            refreshIssue()
             if presentsUI { presentIssue(.notFound, force: userInitiated) }
             return false
         }
@@ -510,9 +560,11 @@ class HelperManager: ObservableObject {
         }
 
         _ = await refreshStatus()
-        refreshIssue()
 
         if status == .requiresApproval {
+            isRegistering = false
+            hasCompletedInitialHealthCheck = true
+            refreshIssue()
             if presentsUI {
                 SMAppService.openSystemSettingsLoginItems()
                 presentIssue(.needsApproval, force: true)
@@ -524,6 +576,9 @@ class HelperManager: ObservableObject {
             if await pingUntilRunning() {
                 return true
             }
+            isRegistering = false
+            hasCompletedInitialHealthCheck = true
+            refreshIssue()
             if presentsUI { presentIssue(.notFound, force: userInitiated) }
             return false
         }
@@ -546,6 +601,8 @@ class HelperManager: ObservableObject {
             }
         }
 
+        isRegistering = false
+        hasCompletedInitialHealthCheck = true
         refreshIssue()
         if presentsUI, let issue = lastIssue {
             presentIssue(issue, force: userInitiated || issue == .notFound)
@@ -565,15 +622,16 @@ class HelperManager: ObservableObject {
 
     @discardableResult
     private func reinstallHelper() async -> Bool {
-        helperLogger.info("[HelperManager] unregister() then register() to rebuild the SMAppService job")
+        helperLogger.info("[HelperManager] Stopping XPC then unregister/register to rebuild the SMAppService job")
+        XPCClient.shared.stop()
+        try? await Task.sleep(for: .milliseconds(400))
         if let errorDescription = await Self.unregisterDaemon() {
             helperLogger.error("[HelperManager] unregister() failed: \(errorDescription)")
         } else {
             helperLogger.info("[HelperManager] unregister() succeeded")
         }
 
-        XPCClient.shared.stop()
-        try? await Task.sleep(for: .milliseconds(800))
+        try? await Task.sleep(for: .milliseconds(1200))
         return await submitRegistration()
     }
 
@@ -612,8 +670,26 @@ class HelperManager: ObservableObject {
         refreshIssue()
     }
 
+    private func syncReconcilingState() {
+        let reconciling = !isRunning && (
+            isRegistering
+                || isResettingHelper
+                || installIfNeededInFlight
+                || healthCheckInFlight
+                || (!hasCompletedInitialHealthCheck && status == .enabled)
+        )
+        if isReconcilingHelper != reconciling {
+            isReconcilingHelper = reconciling
+        }
+    }
+
     private func refreshIssue() {
+        syncReconcilingState()
         if isRunning {
+            lastIssue = nil
+            return
+        }
+        if isReconcilingHelper {
             lastIssue = nil
             return
         }

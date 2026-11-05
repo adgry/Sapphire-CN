@@ -73,12 +73,16 @@ jobs:
           fi
           xcodebuild -version
 
-      - name: Sync MARKETING_VERSION in project.pbxproj
+      - name: Sync MARKETING_VERSION & CURRENT_PROJECT_VERSION in project.pbxproj
         if: steps.meta.outputs.skip != 'true'
         run: |
           python3 - "Sapphire.xcodeproj/project.pbxproj" "${{ steps.meta.outputs.version }}" <<'PY'
           import re, sys
           pbxproj_path, new_version = sys.argv[1], sys.argv[2]
+          nums = [int(x) for x in re.findall(r"\d+", new_version)]
+          while len(nums) < 3:
+              nums.append(0)
+          build_number = max(2, nums[0] * 10000 + nums[1] * 100 + nums[2])
           with open(pbxproj_path, "r", encoding="utf-8") as f:
               content = f.read()
           pattern = re.compile(
@@ -87,6 +91,12 @@ jobs:
           updated, count = pattern.subn(rf"\g<1>{new_version}\g<3>", content)
           if count == 0:
               raise SystemExit("Failed to update MARKETING_VERSION")
+          build_pattern = re.compile(
+              r"(CODE_SIGN_ENTITLEMENTS = Sapphire/Sapphire(?:Debug)?\.entitlements;[\s\S]{0,300}?CURRENT_PROJECT_VERSION = )([^;]+)(;)"
+          )
+          updated, build_count = build_pattern.subn(rf"\g<1>{build_number}\g<3>", updated)
+          if build_count == 0:
+              raise SystemExit("Failed to update CURRENT_PROJECT_VERSION")
           with open(pbxproj_path, "w", encoding="utf-8") as f:
               f.write(updated)
           PY

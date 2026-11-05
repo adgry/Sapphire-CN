@@ -198,6 +198,13 @@ struct PermissionStatusRowView: View {
             case .denied:
                 HStack(spacing: 8) {
                     Image(systemName: "xmark.circle.fill").font(.title2).foregroundColor(.red)
+                    if permission.type == .localNetwork {
+                        Button(isBusy ? "检测中…" : "重新检测") {
+                            permissionsManager.retryLocalNetworkPermission()
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(isBusy)
+                    }
                     Button("去设置") { permissionsManager.openSystemSettings(for: permission.type) }
                         .buttonStyle(.bordered)
                 }

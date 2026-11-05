@@ -6,7 +6,9 @@
 
 import Combine
 import CoreGraphics
+import dnssd
 import Foundation
+import Network
 import XCTest
 @testable import Sapphire
 
@@ -185,11 +187,15 @@ final class LifecycleRobustnessTests: XCTestCase {
 
     func testBonjourServicesIncludeLocalNetworkProbeAndMediaServices() {
         let services = Bundle.main.object(forInfoDictionaryKey: "NSBonjourServices") as? [String] ?? []
+        XCTAssertTrue(services.contains(LocalNetworkAccessProbe.bonjourServiceType))
         XCTAssertTrue(services.contains("_sapphire-lnp._tcp"))
         XCTAssertTrue(services.contains("_sapphirecont._tcp"))
         XCTAssertTrue(services.contains("_FC9F5ED42C8A._tcp"))
         XCTAssertTrue(services.contains("_airplay._tcp"))
         XCTAssertTrue(services.contains("_raop._tcp"))
+
+        XCTAssertTrue(LocalNetworkAccessProbe.isDeniedError(.dns(DNSServiceErrorType(kDNSServiceErr_PolicyDenied))))
+        XCTAssertFalse(LocalNetworkAccessProbe.isDeniedError(.dns(DNSServiceErrorType(kDNSServiceErr_NoAuth))))
     }
 
     func testAutomationStatusPolicyAggregatesLaunchableTargetsCleanly() {

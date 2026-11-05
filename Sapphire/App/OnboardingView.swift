@@ -195,7 +195,7 @@ private struct HelperInstallationStepView: View {
                 .roundedCard(fill: Color.black.opacity(0.15), cornerRadius: 20, stroke: Color.white.opacity(0.1))
                 .padding(.horizontal, 50)
 
-            if !helperReady {
+            if !helperReady && !helperManager.isReconcilingHelper {
                 Button {
                     if helperManager.status == .requiresApproval {
                         SMAppService.openSystemSettingsLoginItems()
@@ -233,11 +233,11 @@ private struct HelperInstallationStepView: View {
             .padding(.top, 8)
         }
         .onAppear {
-            helperManager.updateStatus()
-            helperManager.checkIfRunning()
             if !didStartInstall {
                 didStartInstall = true
-                helperManager.beginInstallation()
+                if !helperManager.isRunning {
+                    helperManager.beginInstallation()
+                }
             }
         }
         .onChange(of: helperManager.status) { _, newStatus in
@@ -259,6 +259,9 @@ private struct HelperInstallationStepView: View {
     }
 
     private var stepGuidance: String {
+        if helperManager.isReconcilingHelper && !helperManager.isRunning {
+            return "正在连接并验证特权辅助工具，请稍候…"
+        }
         switch helperManager.status {
         case .requiresApproval:
             return "系统设置已打开。请在“允许在后台”下同时开启 Sapphire 与 Sapphire Helper，然后返回此处。"
@@ -978,6 +981,19 @@ private struct PermissionRowView: View {
             case .denied:
                 HStack(spacing: 10) {
                     Image(systemName: "xmark.circle.fill").font(.title2).foregroundColor(.red)
+                    if permission.type == .localNetwork {
+                        Button(action: { manager.retryLocalNetworkPermission() }) {
+                            Text(isBusy ? "检测中…" : "重新检测")
+                                .fontWeight(.semibold)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 6)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isBusy)
+                        .background(Color.accentColor.opacity(0.35))
+                        .foregroundColor(.white)
+                        .clipShape(Capsule())
+                    }
                     Button(action: { manager.openSystemSettings(for: permission.type) }) {
                         Text("去设置")
                             .fontWeight(.semibold)
